@@ -119,18 +119,6 @@ kfinalizer -n longhorn-system
 kfinalizer -n longhorn-system --force
 ```
 
-#### Stuck OpenSearch namespace
-
-```bash
-kfinalizer -n opensearch --force
-```
-
-#### Stuck NATS namespace
-
-```bash
-kfinalizer -n nats -v
-```
-
 #### Target specific resources only
 
 ```bash
@@ -282,10 +270,6 @@ This tool was written by Claude, but contributions are welcome!
 - Report issues on GitHub
 - Submit pull requests with improvements
 - Share your use cases and feedback
-
-## License
-
-MIT License - See LICENSE file for details
 
 ## Credits
 
