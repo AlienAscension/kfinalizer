@@ -8,8 +8,8 @@ A CLI tool to remove Kubernetes finalizers and force delete stuck namespaces.
 
 `kfinalizer` helps you clean up stuck Kubernetes namespaces that won't delete due to finalizers. It:
 
--  **Automatically detects** stuck resources in terminating namespaces
--  **Intelligently targets** only the resources that are actually stuck (not all 150+ Kubernetes resource types)
+-  **Detects** stuck resources in terminating namespaces
+-  **Targets** only the resources that are actually stuck (not all 150+ Kubernetes resource types)
 -  **Removes finalizers** from custom resources that are blocking namespace deletion
 -  **Force deletes** namespaces when resources can't be patched (e.g., due to missing webhooks)
 -  **Dry-run mode** lets you preview changes before applying them
