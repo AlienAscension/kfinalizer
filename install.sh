@@ -4,12 +4,11 @@
 set -e
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-REPO_URL="https://raw.githubusercontent.com/user/kfinalizer/main/kfinalizer"
+REPO_URL="https://raw.githubusercontent.com/AlienAscension/kfinalizer/main/kfinalizer"
 
 # Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}Installing kfinalizer...${NC}"
@@ -22,8 +21,20 @@ if [ -f "./kfinalizer" ]; then
     echo "Installing from local file..."
     cp ./kfinalizer "$INSTALL_DIR/kfinalizer"
 else
-    echo "Error: kfinalizer script not found in current directory"
-    exit 1
+    echo "Downloading kfinalizer..."
+    if ! command -v curl &> /dev/null; then
+        echo "Error: curl is required for download but is not installed"
+        exit 1
+    fi
+    if ! curl -fsSL "$REPO_URL" -o "$INSTALL_DIR/kfinalizer"; then
+        echo "Error: Failed to download kfinalizer from $REPO_URL"
+        exit 1
+    fi
+    if ! head -1 "$INSTALL_DIR/kfinalizer" | grep -q '^#!/usr/bin/env bash'; then
+        echo "Error: Downloaded file does not look like the kfinalizer script"
+        rm -f "$INSTALL_DIR/kfinalizer"
+        exit 1
+    fi
 fi
 
 # Make it executable

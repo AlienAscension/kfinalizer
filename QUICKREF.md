@@ -3,14 +3,23 @@
 ## Common Commands
 
 ```bash
-# Basic cleanup (auto-discovers all resources)
+# Basic cleanup (auto-discovers stuck resources from namespace status)
 kfinalizer -n <namespace>
 
-# Preview changes first (recommended)
+# Preview changes first (recommended — server-side dry-run)
 kfinalizer -n <namespace> --dry-run -v
 
 # Force delete stuck namespace
 kfinalizer -n <namespace> --force
+
+# Strip orphan finalizers via raw API before force delete
+kfinalizer -n <namespace> --force --delete-orphans
+
+# Target a specific cluster
+kfinalizer -n <namespace> -c prod-cluster
+
+# Custom timeout for slow clusters
+kfinalizer -n <namespace> --timeout 120s
 
 # Target specific resources only
 kfinalizer -n <namespace> -r <resource-type>
@@ -77,13 +86,15 @@ kubectl auth can-i patch <resource> -n <namespace>
 2. **Use verbose for debugging**: `-v`
 3. **Force only when needed**: `-f`
 4. **Target specific resources** if you know which are stuck
+5. **Multi-cluster safety**: always pass `-c <context>` (or check the printed context line) to avoid hitting the wrong cluster.
+6. **Slow clusters**: raise the per-request timeout with `--timeout 120s`.
 
 ## How It Works
 
-1. Discovers all namespaced resources (or uses your `-r` list)
-2. Finds instances of each resource in the namespace
-3. Patches each to remove finalizers: `{"metadata":{"finalizers":null}}`
-4. Optionally force-deletes the namespace
+1. Reads stuck resources from namespace status (or uses your `-r` list, or `--all` for everything)
+2. Filters to instances that actually have finalizers (via jq)
+3. Patches each by name to remove finalizers: `{"metadata":{"finalizers":null}}`
+4. Optionally force-deletes the namespace (warns about orphans; `--delete-orphans` strips them first)
 
 ## Safety Notes
 

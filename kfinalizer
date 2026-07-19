@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 
 # kfinalizer - Remove finalizers from Kubernetes resources
-# Author: Claude
-# Version: 1.0.0
+# Version: 1.1.0
 
 # Don't exit on errors - we want to continue processing all resources
 set +e
+set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 NAMESPACE=""
 DRY_RUN=false
 VERBOSE=false
 FORCE_DELETE_NS=false
 ALL_RESOURCES=false
 SPECIFIC_RESOURCES=()
+CONTEXT=""
+KUBECONFIG_OVERRIDE=""
+REQUEST_TIMEOUT="30s"
+DELETE_ORPHANS=false
+ORPHANED_RESOURCES=()
+KUBECTL_ARGS=()
 
 # Colors
 RED='\033[0;31m'
@@ -35,6 +41,11 @@ OPTIONS:
     -r, --resource <type>       Specific resource type (can be used multiple times)
     -d, --dry-run              Show what would be done without making changes
     -f, --force                Force delete namespace after removing finalizers
+    --delete-orphans           Strip finalizers on stuck resources via raw /finalize
+                               API before force-deleting namespace
+    -c, --context <name>       Target a specific kube context
+    --kubeconfig <path>        Use a specific kubeconfig file
+    --timeout <sec>            Per-request kubectl timeout (default: 30s)
     -v, --verbose              Show detailed output
     -h, --help                 Show this help message
     -V, --version              Show version
@@ -55,9 +66,19 @@ EXAMPLES:
     # Verbose output with dry run
     kfinalizer -n my-namespace -v --dry-run
 
+    # Target a specific context with a custom kubeconfig
+    kfinalizer -n opensearch -c prod-cluster --kubeconfig ~/.kube/prod.conf
+
+    # Strip orphan finalizers before force delete
+    kfinalizer -n opensearch --force --delete-orphans
+
 ENVIRONMENT VARIABLES:
-    KFINALIZER_NAMESPACE    Default namespace if -n not specified
-    KFINALIZER_DRY_RUN      Set to 'true' to enable dry-run mode
+    KFINALIZER_NAMESPACE        Default namespace if -n not specified
+    KFINALIZER_DRY_RUN          Set to 'true' to enable dry-run mode
+    KFINALIZER_CONTEXT          Default kube context
+    KFINALIZER_KUBECONFIG       Default kubeconfig path
+    KFINALIZER_TIMEOUT          Per-request kubectl timeout (default: 30s)
+    KFINALIZER_DELETE_ORPHANS   Set to 'true' to enable --delete-orphans
 
 EOF
 }
@@ -90,9 +111,25 @@ check_prerequisites() {
         exit 1
     fi
 
-    if ! kubectl cluster-info &> /dev/null; then
-        log_error "Cannot connect to Kubernetes cluster"
+    if ! command -v jq &> /dev/null; then
+        log_error "jq is not installed or not in PATH"
         exit 1
+    fi
+
+    local cluster_err
+    if ! cluster_err=$(kubectl "${KUBECTL_ARGS[@]}" cluster-info 2>&1); then
+        log_error "Cannot connect to Kubernetes cluster: $cluster_err"
+        exit 1
+    fi
+
+    local current_ctx
+    current_ctx=$(kubectl "${KUBECTL_ARGS[@]}" config current-context 2>&1) || {
+        log_error "Cannot determine current context: $current_ctx"
+        exit 1
+    }
+    log_info "Context: $current_ctx"
+    if [ -n "$KUBECONFIG_OVERRIDE" ]; then
+        log_info "Kubeconfig: $KUBECONFIG_OVERRIDE"
     fi
 
     if [ -z "$NAMESPACE" ]; then
@@ -102,8 +139,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    if ! kubectl get namespace "$NAMESPACE" &> /dev/null; then
-        log_error "Namespace '$NAMESPACE' does not exist"
+    local ns_err
+    if ! ns_err=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" 2>&1); then
+        log_error "Namespace '$NAMESPACE' does not exist: $ns_err"
         exit 1
     fi
 }
@@ -114,17 +152,18 @@ get_resources_to_clean() {
         printf '%s\n' "${SPECIFIC_RESOURCES[@]}"
     elif [ "$ALL_RESOURCES" = true ]; then
         # Get ALL namespaced resources (CRDs + built-in)
-        kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null
+        kubectl "${KUBECTL_ARGS[@]}" api-resources --verbs=list --namespaced -o name 2>/dev/null
     else
         # Get only stuck resources from namespace conditions (DEFAULT)
-        local stuck=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceContentRemaining")].message}' 2>/dev/null | \
-            grep -oP '\S+\.\S+ has \d+' | awk '{print $1}' | sort -u 2>/dev/null)
+        local stuck
+        stuck=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceContentRemaining")].message}' 2>/dev/null | \
+            grep -oP '\S+ has \d+ resource instances?' | awk '{print $1}' | sort -u 2>/dev/null || true)
         
         if [ -n "$stuck" ]; then
             echo "$stuck"
         else
-            # Namespace not terminating or no stuck resources - fallback to all CRDs
-            kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null | grep '\.'
+            # Namespace not terminating or no stuck resources - fallback to all namespaced resources
+            kubectl "${KUBECTL_ARGS[@]}" api-resources --verbs=list --namespaced -o name 2>/dev/null
         fi
     fi
 }
@@ -134,57 +173,46 @@ remove_finalizers() {
     local dry_run_flag=""
     
     if [ "$DRY_RUN" = true ]; then
-        dry_run_flag="--dry-run=client"
+        dry_run_flag="--dry-run=server"
     fi
 
     log_verbose "Checking resource: $resource"
 
-    # Check if resource exists in namespace (don't exit on error)
-    local check_result
-    check_result=$(kubectl get "$resource" -n "$NAMESPACE" 2>&1) || {
-        log_verbose "Resource type '$resource' not accessible: $check_result"
-        return 0
-    }
+    # Get names of instances that have finalizers
+    local names=()
+    mapfile -t names < <(kubectl "${KUBECTL_ARGS[@]}" get "$resource" -n "$NAMESPACE" -o json 2>/dev/null \
+        | jq -r '.items[] | select(.metadata.finalizers | length > 0) | .metadata.name' 2>/dev/null)
 
-    local count=$(kubectl get "$resource" -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l)
-    
-    if [ "$count" -eq 0 ]; then
-        log_verbose "No instances of '$resource' found"
+    if [ ${#names[@]} -eq 0 ]; then
+        log_verbose "No instances of '$resource' have finalizers"
         return 0
     fi
 
-    log_info "Processing $count instance(s) of $resource"
+    log_info "Processing ${#names[@]} instance(s) of $resource with finalizers"
 
-    # Try batch patch first
-    if kubectl patch "$resource" --all -n "$NAMESPACE" $dry_run_flag \
-        -p '{"metadata":{"finalizers":null}}' --type=merge &>/dev/null; then
-        log_success "Removed finalizers from all $resource"
-        return 0
-    fi
-
-    # Fallback: patch individually
     local success=0
     local failed=0
-    local names=()
     
-    while IFS= read -r res; do
-        names+=("$res")
-    done < <(kubectl get "$resource" -n "$NAMESPACE" -o name 2>/dev/null)
-    
-    for res in "${names[@]}"; do
-        if kubectl patch "$res" -n "$NAMESPACE" $dry_run_flag \
-            -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null; then
-            log_verbose "Patched $res"
+    for name in "${names[@]}"; do
+        local err
+        if err=$(kubectl "${KUBECTL_ARGS[@]}" patch "$resource" "$name" -n "$NAMESPACE" $dry_run_flag \
+            -p '{"metadata":{"finalizers":null}}' --type=merge 2>&1); then
+            log_verbose "Patched $resource/$name"
             ((success++))
         else
-            log_warning "Failed to patch $res"
+            log_warning "Failed to patch $resource/$name: $err"
+            # Check if the instance still has finalizers
+            local f
+            f=$(kubectl "${KUBECTL_ARGS[@]}" get "$resource" "$name" -n "$NAMESPACE" -o json 2>/dev/null \
+                | jq -r '.metadata.finalizers | length' 2>/dev/null)
+            if [ -n "$f" ] && [ "$f" -gt 0 ]; then
+                ORPHANED_RESOURCES+=("$resource/$name")
+            fi
             ((failed++))
         fi
     done
 
-    if [ ${#names[@]} -eq 0 ]; then
-        log_verbose "No resources to patch"
-    elif [ $failed -eq 0 ]; then
+    if [ $failed -eq 0 ]; then
         log_success "Removed finalizers from all $resource ($success patched)"
     else
         log_warning "Removed finalizers from $resource ($success succeeded, $failed failed)"
@@ -194,25 +222,46 @@ remove_finalizers() {
 force_delete_namespace() {
     if [ "$DRY_RUN" = true ]; then
         log_info "Would force delete namespace '$NAMESPACE'"
+        if [ ${#ORPHANED_RESOURCES[@]} -gt 0 ]; then
+            echo ""
+            log_warning "The following resources would become orphaned in etcd:"
+            local entry
+            for entry in "${ORPHANED_RESOURCES[@]}"; do
+                echo "  - $entry"
+            done
+            if [ "$DELETE_ORPHANS" = true ]; then
+                echo ""
+                log_info "Would strip finalizers via raw /finalize API for each orphaned resource:"
+                for entry in "${ORPHANED_RESOURCES[@]}"; do
+                    local res="${entry%/*}"
+                    local name="${entry#*/}"
+                    echo "  - kubectl replace --raw <api-path>/$name/finalize (constructed from apiVersion + plural)"
+                done
+            fi
+        fi
         return 0
     fi
 
     log_info "Force deleting namespace '$NAMESPACE'..."
     
-    if kubectl get namespace "$NAMESPACE" -o json 2>/dev/null | \
-        jq '.spec.finalizers = []' | \
-        kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - &>/dev/null; then
-        log_success "Namespace force deleted"
-    else
-        log_error "Failed to force delete namespace"
+    local err
+    if ! err=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o json 2>/dev/null \
+         | jq '.spec.finalizers = []' 2>/dev/null \
+         | kubectl "${KUBECTL_ARGS[@]}" replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>&1); then
+        log_error "Failed to force delete namespace: $err"
         exit 1
     fi
+    log_success "Namespace force deleted"
 }
 
 main() {
     # Check for environment variables
     NAMESPACE="${KFINALIZER_NAMESPACE:-}"
     [ "${KFINALIZER_DRY_RUN:-false}" = "true" ] && DRY_RUN=true
+    CONTEXT="${KFINALIZER_CONTEXT:-}"
+    KUBECONFIG_OVERRIDE="${KFINALIZER_KUBECONFIG:-}"
+    REQUEST_TIMEOUT="${KFINALIZER_TIMEOUT:-30s}"
+    [ "${KFINALIZER_DELETE_ORPHANS:-false}" = "true" ] && DELETE_ORPHANS=true
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -237,6 +286,27 @@ main() {
                 FORCE_DELETE_NS=true
                 shift
                 ;;
+            --delete-orphans)
+                DELETE_ORPHANS=true
+                shift
+                ;;
+            -c|--context)
+                CONTEXT="$2"
+                shift 2
+                ;;
+            --kubeconfig)
+                KUBECONFIG_OVERRIDE="$2"
+                shift 2
+                ;;
+            --timeout)
+                REQUEST_TIMEOUT="$2"
+                if [[ ! "$REQUEST_TIMEOUT" =~ ^[0-9]+s?$ ]]; then
+                    log_error "Invalid --timeout value: $REQUEST_TIMEOUT (expected number or number+s)"
+                    exit 1
+                fi
+                [[ "$REQUEST_TIMEOUT" != *s ]] && REQUEST_TIMEOUT="${REQUEST_TIMEOUT}s"
+                shift 2
+                ;;
             -v|--verbose)
                 VERBOSE=true
                 shift
@@ -258,6 +328,16 @@ main() {
         esac
     done
 
+    # Build kubectl global args
+    KUBECTL_ARGS=()
+    if [ -n "$KUBECONFIG_OVERRIDE" ]; then
+        KUBECTL_ARGS+=(--kubeconfig "$KUBECONFIG_OVERRIDE")
+    fi
+    if [ -n "$CONTEXT" ]; then
+        KUBECTL_ARGS+=(--context "$CONTEXT")
+    fi
+    KUBECTL_ARGS+=(--request-timeout "$REQUEST_TIMEOUT")
+
     # Check prerequisites
     check_prerequisites
 
@@ -270,23 +350,26 @@ main() {
     log_info "Namespace: $NAMESPACE"
     
     # Check namespace status and show what's stuck
-    local ns_status=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+    local ns_status
+    ns_status=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
     if [ "$ns_status" = "Terminating" ]; then
         log_warning "Namespace is Terminating - checking what's stuck..."
         
         # Extract stuck resources from namespace conditions
-        local stuck_resources=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceContentRemaining")].message}' 2>/dev/null | \
-            grep -oP '\S+\.\S+ has \d+ resource' 2>/dev/null || true)
+        local stuck_resources
+        stuck_resources=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceContentRemaining")].message}' 2>/dev/null | \
+            grep -oP '\S+ has \d+ resource instances?' 2>/dev/null || true)
         
         if [ -n "$stuck_resources" ]; then
             log_info "Stuck resources found:"
-            echo "$stuck_resources" | while read line; do
+            echo "$stuck_resources" | while read -r line; do
                 echo "  - $line"
             done
         fi
         
         # Extract remaining finalizers
-        local finalizers=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceFinalizersRemaining")].message}' 2>/dev/null | \
+        local finalizers
+        finalizers=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="NamespaceFinalizersRemaining")].message}' 2>/dev/null | \
             grep -oP 'finalizers remaining: \K.*' 2>/dev/null || true)
         
         if [ -n "$finalizers" ]; then
@@ -331,14 +414,72 @@ main() {
     fi
 
     # Check namespace status
-    if kubectl get namespace "$NAMESPACE" &>/dev/null; then
-        local status=$(kubectl get namespace "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+    if kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" >/dev/null 2>&1; then
+        local status
+        status=$(kubectl "${KUBECTL_ARGS[@]}" get namespace "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
         
         if [ "$status" = "Terminating" ]; then
             log_warning "Namespace is still in Terminating state"
             
             if [ "$FORCE_DELETE_NS" = true ]; then
                 echo ""
+                if [ ${#ORPHANED_RESOURCES[@]} -gt 0 ]; then
+                    echo ""
+                    echo -e "${YELLOW}⚠ WARNING: The following resources still have finalizers and will become orphaned in etcd if the namespace is force-deleted:${NC}"
+                    local entry
+                    for entry in "${ORPHANED_RESOURCES[@]}"; do
+                        echo "  - $entry"
+                    done
+                    echo ""
+                    if [ "$DELETE_ORPHANS" = true ]; then
+                        log_info "Stripping finalizers via raw /finalize API for orphaned resources..."
+                        local new_orphans=()
+                        for entry in "${ORPHANED_RESOURCES[@]}"; do
+                            local res="${entry%/*}"
+                            local name="${entry#*/}"
+
+                            # Fetch apiVersion to construct the API path (selfLink removed in k8s 1.20+)
+                            local api_version
+                            api_version=$(kubectl "${KUBECTL_ARGS[@]}" get "$res" -n "$NAMESPACE" "$name" -o jsonpath='{.apiVersion}' 2>/dev/null) || true
+                            if [ -z "$api_version" ]; then
+                                log_warning "Cannot determine apiVersion for $res/$name; skipping"
+                                new_orphans+=("$entry")
+                                continue
+                            fi
+
+                            # Derive plural name from resource type (strip group suffix if present)
+                            local plural
+                            if [[ "$res" == *.* ]]; then
+                                plural="${res%%.*}"
+                            else
+                                plural="$res"
+                            fi
+
+                            # Build API path
+                            local api_path
+                            if [[ "$api_version" == */* ]]; then
+                                # Group/version format (e.g. longhorn.io/v1beta2)
+                                api_path="/apis/${api_version}/namespaces/${NAMESPACE}/${plural}/${name}"
+                            else
+                                # Core API (e.g. v1)
+                                api_path="/api/${api_version}/namespaces/${NAMESPACE}/${plural}/${name}"
+                            fi
+
+                            local raw_err
+                            if raw_err=$(kubectl "${KUBECTL_ARGS[@]}" get "$res" -n "$NAMESPACE" "$name" -o json 2>/dev/null \
+                                | jq '.metadata.finalizers = []' 2>/dev/null \
+                                | kubectl "${KUBECTL_ARGS[@]}" replace --raw "${api_path}/finalize" -f - 2>&1); then
+                                log_success "Stripped finalizers from $res/$name via raw API"
+                            else
+                                log_warning "Failed to strip finalizers from $res/$name via raw API: $raw_err"
+                                new_orphans+=("$entry")
+                            fi
+                        done
+                        ORPHANED_RESOURCES=("${new_orphans[@]}")
+                    else
+                        log_info "Re-run with --delete-orphans to strip these finalizers via the raw API before force-deleting."
+                    fi
+                fi
                 force_delete_namespace
             else
                 echo ""

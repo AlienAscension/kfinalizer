@@ -16,9 +16,9 @@ A CLI tool to remove Kubernetes finalizers and force delete stuck namespaces.
 
 ## How It Works
 
-1. **Reads namespace status** to identify which resources are stuck (from `NamespaceContentRemaining` condition)
-2. **Patches each resource** to remove finalizers: `kubectl patch <resource> -p '{"metadata":{"finalizers":null}}'`
-3. **Falls back to force delete** if patching fails (removes namespace finalizer directly via API)
+1. **Reads namespace status** to identify which resources are stuck (from `NamespaceContentRemaining` condition) — including built-in resources like `persistentvolumeclaims`, not just CRDs
+2. **Patches only the instances that actually have finalizers** (filtered via jq), by name: `kubectl patch <resource> <name> -p '{"metadata":{"finalizers":null}}' --type=merge`
+3. **Falls back to force delete** if patching fails (removes namespace finalizer directly via API). Before force-deleting, warns about resources that would be orphaned in etcd; use `--delete-orphans` to strip their finalizers via the raw `/finalize` API first.
 
 ## Installation
 
@@ -127,6 +127,21 @@ kfinalizer -n my-namespace \
   -r anothercr.example.com
 ```
 
+#### Target a specific cluster
+
+```bash
+# Use a specific context (safer for multi-cluster admins)
+kfinalizer -n my-namespace -c prod-cluster
+
+# Or a specific kubeconfig file
+kfinalizer -n my-namespace --kubeconfig ~/.kube/prod.conf
+
+# Both together
+kfinalizer -n my-namespace -c prod-cluster --kubeconfig ~/.kube/prod.conf
+```
+
+The active context is printed before any action, so you always know which cluster you're hitting.
+
 ## Command-Line Options
 
 ```
@@ -134,11 +149,24 @@ OPTIONS:
     -n, --namespace <n>      Namespace to clean (required)
     -r, --resource <type>    Specific resource type (can be used multiple times)
     -a, --all                Process ALL resources (default: stuck resources only)
-    -d, --dry-run            Preview changes without applying them
+    -d, --dry-run            Preview changes (server-side dry-run — exercises admission webhooks)
     -f, --force              Force delete namespace after removing finalizers
+    --delete-orphans         Strip finalizers on stuck resources via raw /finalize API before force-deleting
+    -c, --context <name>     Target a specific kube context
+    --kubeconfig <path>     Use a specific kubeconfig file
+    --timeout <sec>          Per-request kubectl timeout (default: 30s)
     -v, --verbose            Show detailed output
     -h, --help               Show help message
     -V, --version            Show version
+```
+
+ENVIRONMENT VARIABLES:
+    KFINALIZER_NAMESPACE        Default namespace if -n not specified
+    KFINALIZER_DRY_RUN          Set to 'true' to enable dry-run mode
+    KFINALIZER_CONTEXT          Default kube context
+    KFINALIZER_KUBECONFIG       Default kubeconfig path
+    KFINALIZER_TIMEOUT          Per-request kubectl timeout (default: 30s)
+    KFINALIZER_DELETE_ORPHANS   Set to 'true' to enable --delete-orphans
 ```
 
 ## Real-World Example
@@ -184,6 +212,8 @@ longhorn-system   (deleted)
 
 **Result**: Namespace deleted successfully after 21 days of being stuck! ✅
 
+**Note**: v1.1 also detects built-in resources (e.g. `persistentvolumeclaims`) that carry finalizers like `kubernetes.io/pvc-protection` — these were silently missed in v1.0.
+
 ## Why Patches Might Fail
 
 Common reasons patches fail:
@@ -196,6 +226,9 @@ Common reasons patches fail:
    
 3. **API server issues**: Resource definitions are corrupted or unavailable
    - **Solution**: Use `--force` to bypass and delete namespace directly
+
+4. **Hung webhooks**: An admission webhook is unreachable and the patch call hangs.
+   - **Solution**: The tool now applies a 30-second timeout to every kubectl call by default. Raise it with `--timeout 120s` if your cluster is slow.
 
 ## Safety & Best Practices
 
@@ -240,7 +273,15 @@ kubectl auth can-i patch <resource-type> -n <namespace>
 
 ### Namespace still stuck after force delete
 
-Very rare, but try manual cleanup:
+If `--force` reports resources that would be orphaned, strip their finalizers first with the supported path:
+
+```bash
+kfinalizer -n <namespace> --force --delete-orphans
+```
+
+This removes finalizers from stuck resources via the raw `/finalize` API (bypassing admission webhooks) before force-deleting the namespace.
+
+If that still doesn't work, very rare, try manual cleanup:
 ```bash
 kubectl get namespace <namespace> -o json | \
   jq '.spec.finalizers = []' | \
@@ -259,7 +300,7 @@ The latest version only checks **stuck resources** (from namespace status), not 
 ## Requirements
 
 - `kubectl` (configured and working)
-- `jq` (for force delete functionality)
+- `jq` (required for finalizer filtering and force delete)
 - Bash 4.0+
 - Appropriate Kubernetes permissions
 
@@ -282,7 +323,7 @@ This tool was written by Claude, but contributions are welcome!
 **Quick Commands Reference:**
 
 ```bash
-# Preview changes
+# Preview changes (server-side dry-run, exercises webhooks)
 kfinalizer -n <namespace> --dry-run -v
 
 # Remove finalizers
@@ -290,6 +331,15 @@ kfinalizer -n <namespace>
 
 # Force delete (when webhooks are missing)
 kfinalizer -n <namespace> --force
+
+# Strip orphan finalizers via raw API, then force delete
+kfinalizer -n <namespace> --force --delete-orphans
+
+# Target a specific cluster
+kfinalizer -n <namespace> -c prod-cluster
+
+# Custom timeout for slow clusters
+kfinalizer -n <namespace> --timeout 120s
 
 # Help
 kfinalizer --help
