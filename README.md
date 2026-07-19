@@ -316,10 +316,7 @@ Contributions are welcome!
 
 The initial v1.0 implementation was written by Claude (Anthropic AI Assistant) during a collaborative session to solve stuck Kubernetes namespaces.
 
-The v1.1 release was designed, implemented, and reviewed by open-source AI models:
-- **Architecture & spec**: `glm-5.2` (opencode-go) — the orchestrator and `@architect` subagent
-- **Implementation**: `glm-5.2` via the `@coder` subagent
-- **Code review**: `glm-5.2` via the `@review` subagent
+The v1.1 release was designed, implemented, and reviewed by the open-source AI model `glm-5.2` (opencode-go).
 
 All work was coordinated through [opencode](https://opencode.ai) using the [superpowers](https://github.com/obra/superpowers) skill suite.
 
