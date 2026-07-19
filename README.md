@@ -22,35 +22,53 @@ A CLI tool to remove Kubernetes finalizers and force delete stuck namespaces.
 
 ## Installation
 
-### Quick Install
+### One-liner (recommended)
 
 ```bash
-# Download the script
-curl -O https://raw.githubusercontent.com/AlienAscension/kfinalizer/main/kfinalizer
-chmod +x kfinalizer
-
-# Move to your PATH
-sudo mv kfinalizer /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/AlienAscension/kfinalizer/main/install.sh | bash
 ```
 
-### Install to User Directory
+Downloads and installs to `~/.local/bin/kfinalizer` (default). The installer verifies the downloaded script starts with `#!/usr/bin/env bash` and warns you if `~/.local/bin` isn't on your PATH.
+
+### From a clone
 
 ```bash
-# Clone the repo
 git clone https://github.com/AlienAscension/kfinalizer.git
 cd kfinalizer
 
-# Install using Make
+# Either of these works (both install to ~/.local/bin by default)
 make install
-
-# Or use the install script
 ./install.sh
 ```
 
-This installs to `~/.local/bin/kfinalizer`. Make sure `~/.local/bin` is in your PATH:
+### Custom install location
+
+Both `make install` and `install.sh` honor `INSTALL_DIR`:
 
 ```bash
-export PATH="$PATH:~/.local/bin"
+INSTALL_DIR=/opt/bin ./install.sh
+# or
+make install INSTALL_DIR=/opt/bin
+```
+
+### System-wide install
+
+If you prefer `/usr/local/bin` (requires sudo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AlienAscension/kfinalizer/main/install.sh | sudo INSTALL_DIR=/usr/local/bin bash
+```
+
+### Verify
+
+```bash
+kfinalizer --version    # should print "kfinalizer version 1.1.0"
+```
+
+If `kfinalizer` isn't found, add `~/.local/bin` to your PATH:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # or ~/.zshrc
 ```
 
 ## Tutorial
