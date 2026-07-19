@@ -2,7 +2,7 @@
 
 A CLI tool to remove Kubernetes finalizers and force delete stuck namespaces.
 
-> ⚠️ **Disclaimer**: This tool was 100% written by Claude (Anthropic's AI assistant). It comes with **NO WARRANTIES** or **GUARANTEES**. Use at your own risk. The authors are not responsible for any damage, data loss, or cluster issues that may result from using this tool.
+> ⚠️ **Disclaimer**: This tool comes with **NO WARRANTIES** or **GUARANTEES**. Use at your own risk. The authors are not responsible for any damage, data loss, or cluster issues that may result from using this tool.
 
 ## What It Does
 
@@ -306,7 +306,7 @@ The latest version only checks **stuck resources** (from namespace status), not 
 
 ## Contributing
 
-This tool was written by Claude, but contributions are welcome! 
+Contributions are welcome! 
 
 - Report issues on GitHub
 - Submit pull requests with improvements
@@ -314,7 +314,14 @@ This tool was written by Claude, but contributions are welcome!
 
 ## Credits
 
-100% written by Claude (Anthropic AI Assistant) during a collaborative session to solve stuck Kubernetes namespaces.
+The initial v1.0 implementation was written by Claude (Anthropic AI Assistant) during a collaborative session to solve stuck Kubernetes namespaces.
+
+The v1.1 release was designed, implemented, and reviewed by open-source AI models:
+- **Architecture & spec**: `glm-5.2` (opencode-go) — the orchestrator and `@architect` subagent
+- **Implementation**: `glm-5.2` via the `@coder` subagent
+- **Code review**: `glm-5.2` via the `@review` subagent
+
+All work was coordinated through [opencode](https://opencode.ai) using the [superpowers](https://github.com/obra/superpowers) skill suite.
 
 **Remember**: Use at your own risk. No warranties or guarantees provided.
 
