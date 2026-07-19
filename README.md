@@ -51,13 +51,7 @@ INSTALL_DIR=/opt/bin ./install.sh
 make install INSTALL_DIR=/opt/bin
 ```
 
-### System-wide install
-
-If you prefer `/usr/local/bin` (requires sudo):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AlienAscension/kfinalizer/main/install.sh | sudo INSTALL_DIR=/usr/local/bin bash
-```
+For a system-wide install, use `sudo INSTALL_DIR=/usr/local/bin ./install.sh`.
 
 ### Verify
 
