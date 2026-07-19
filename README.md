@@ -172,14 +172,16 @@ OPTIONS:
     -V, --version            Show version
 ```
 
-ENVIRONMENT VARIABLES:
-    KFINALIZER_NAMESPACE        Default namespace if -n not specified
-    KFINALIZER_DRY_RUN          Set to 'true' to enable dry-run mode
-    KFINALIZER_CONTEXT          Default kube context
-    KFINALIZER_KUBECONFIG       Default kubeconfig path
-    KFINALIZER_TIMEOUT          Per-request kubectl timeout (default: 30s)
-    KFINALIZER_DELETE_ORPHANS   Set to 'true' to enable --delete-orphans
-```
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `KFINALIZER_NAMESPACE` | Default namespace if `-n` not specified |
+| `KFINALIZER_DRY_RUN` | Set to `true` to enable dry-run mode |
+| `KFINALIZER_CONTEXT` | Default kube context |
+| `KFINALIZER_KUBECONFIG` | Default kubeconfig path |
+| `KFINALIZER_TIMEOUT` | Per-request kubectl timeout (default: `30s`) |
+| `KFINALIZER_DELETE_ORPHANS` | Set to `true` to enable `--delete-orphans` |
 
 ## Real-World Example
 
